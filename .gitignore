@@ -85,6 +85,7 @@ cmake-build-*
 
 # Shader binaries
 *.spv
+*.dxil
 
 # VS code
 .vscode
