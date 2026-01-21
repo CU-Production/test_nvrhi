@@ -10,7 +10,6 @@ set(SOURCES
 # Shader files (for IDE integration)
 set(SHADERS
     shaders/triangle.slang
-    shaders/triangle.hlsl
 )
 
 # Create executable
@@ -67,7 +66,6 @@ add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
 # Optional: Add shader compilation target
 # Try Slang first, then fall back to DXC
 find_program(SLANGC_EXECUTABLE slangc)
-find_program(DXC_EXECUTABLE dxc)
 
 if(SLANGC_EXECUTABLE)
     message(STATUS "Found Slang compiler: ${SLANGC_EXECUTABLE}")
@@ -96,33 +94,9 @@ if(SLANGC_EXECUTABLE)
     # Make triangle depend on shader compilation
     add_dependencies(${TARGET_NAME} compile_triangle_shaders)
     
-elseif(DXC_EXECUTABLE)
-    message(STATUS "Found DXC compiler: ${DXC_EXECUTABLE}")
-    
-    # Custom target to compile shaders using DXC
-    add_custom_target(compile_triangle_shaders
-        COMMAND ${DXC_EXECUTABLE}
-            -T vs_6_0
-            -E vsMain
-            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle.hlsl"
-            -Fo "${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle_vs.dxil"
-        COMMAND ${DXC_EXECUTABLE}
-            -T ps_6_0
-            -E psMain
-            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle.hlsl"
-            -Fo "${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle_ps.dxil"
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        COMMENT "Compiling HLSL shaders with DXC..."
-        SOURCES ${SHADERS}
-    )
-    
-    # Make triangle depend on shader compilation
-    add_dependencies(${TARGET_NAME} compile_triangle_shaders)
-    
 else()
-    message(WARNING "No shader compiler found (slangc or dxc). Shaders must be compiled manually.")
+    message(WARNING "No shader compiler found (slangc). Shaders must be compiled manually.")
     message(STATUS "To compile shaders manually, run one of:")
     message(STATUS "  Using Slang: slangc triangle.slang -profile sm_6_0 -target dxil -entry vsMain -stage vertex -o triangle_vs.dxil")
-    message(STATUS "  Using DXC:   dxc -T vs_6_0 -E vsMain triangle.hlsl -Fo triangle_vs.dxil")
     message(STATUS "Or run the compile_shaders.bat script in the shaders directory.")
 endif()

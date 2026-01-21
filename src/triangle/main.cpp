@@ -612,6 +612,9 @@ void TriangleApp::mainLoop()
 {
     while (!glfwWindowShouldClose(m_window))
     {
+        if(glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+            glfwSetWindowShouldClose(m_window, true);
+
         glfwPollEvents();
         render();
     }
