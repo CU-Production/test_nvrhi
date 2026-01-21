@@ -166,17 +166,6 @@ bool DeviceManager_VK::createDevice(const DeviceCreationParams& params)
     if (!createLogicalDevice()) return false;
     loadDeviceFunctions();
     
-    // Create semaphores for synchronization
-    VkSemaphoreCreateInfo semaphoreInfo = {};
-    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    
-    if (vkCreateSemaphore(m_vkDevice, &semaphoreInfo, nullptr, &m_imageAvailableSemaphore) != VK_SUCCESS ||
-        vkCreateSemaphore(m_vkDevice, &semaphoreInfo, nullptr, &m_renderFinishedSemaphore) != VK_SUCCESS)
-    {
-        std::cerr << "[Vulkan] Failed to create semaphores" << std::endl;
-        return false;
-    }
-    
     // Create NVRHI Vulkan device
     nvrhi::vulkan::DeviceDesc deviceDesc = {};
     deviceDesc.errorCB = &m_messageCallback;
@@ -485,18 +474,6 @@ void DeviceManager_VK::destroyDevice()
     m_device = nullptr;
     m_nvrhiDevice = nullptr;
     
-    if (m_imageAvailableSemaphore != VK_NULL_HANDLE && vkDestroySemaphore)
-    {
-        vkDestroySemaphore(m_vkDevice, m_imageAvailableSemaphore, nullptr);
-        m_imageAvailableSemaphore = VK_NULL_HANDLE;
-    }
-    
-    if (m_renderFinishedSemaphore != VK_NULL_HANDLE && vkDestroySemaphore)
-    {
-        vkDestroySemaphore(m_vkDevice, m_renderFinishedSemaphore, nullptr);
-        m_renderFinishedSemaphore = VK_NULL_HANDLE;
-    }
-    
     if (m_vkDevice != VK_NULL_HANDLE && vkDestroyDevice)
     {
         vkDestroyDevice(m_vkDevice, nullptr);
@@ -630,12 +607,59 @@ bool DeviceManager_VK::createSwapChain()
     m_swapChainImages.resize(imageCount);
     vkGetSwapchainImagesKHR(m_vkDevice, m_swapChain, &imageCount, m_swapChainImages.data());
     
+    // Create synchronization semaphores
+    VkSemaphoreCreateInfo semaphoreInfo = {};
+    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    
+    // Create present semaphores (one per swap chain image)
+    m_presentSemaphores.resize(imageCount);
+    for (uint32_t i = 0; i < imageCount; i++)
+    {
+        if (vkCreateSemaphore(m_vkDevice, &semaphoreInfo, nullptr, &m_presentSemaphores[i]) != VK_SUCCESS)
+        {
+            std::cerr << "[Vulkan] Failed to create present semaphore " << i << std::endl;
+            return false;
+        }
+    }
+    
+    // Create acquire semaphores (need more than swap chain images for proper frame pipelining)
+    uint32_t acquireSemaphoreCount = std::max(imageCount, m_params.swapChainBufferCount + 1);
+    m_acquireSemaphores.resize(acquireSemaphoreCount);
+    for (uint32_t i = 0; i < acquireSemaphoreCount; i++)
+    {
+        if (vkCreateSemaphore(m_vkDevice, &semaphoreInfo, nullptr, &m_acquireSemaphores[i]) != VK_SUCCESS)
+        {
+            std::cerr << "[Vulkan] Failed to create acquire semaphore " << i << std::endl;
+            return false;
+        }
+    }
+    m_acquireSemaphoreIndex = 0;
+    
     return createRenderTargets();
 }
 
 void DeviceManager_VK::destroySwapChain()
 {
     destroyRenderTargets();
+    
+    // Destroy semaphores
+    for (auto semaphore : m_presentSemaphores)
+    {
+        if (semaphore != VK_NULL_HANDLE && vkDestroySemaphore)
+        {
+            vkDestroySemaphore(m_vkDevice, semaphore, nullptr);
+        }
+    }
+    m_presentSemaphores.clear();
+    
+    for (auto semaphore : m_acquireSemaphores)
+    {
+        if (semaphore != VK_NULL_HANDLE && vkDestroySemaphore)
+        {
+            vkDestroySemaphore(m_vkDevice, semaphore, nullptr);
+        }
+    }
+    m_acquireSemaphores.clear();
     
     if (m_swapChain != VK_NULL_HANDLE && vkDestroySwapchainKHR)
     {
@@ -710,9 +734,12 @@ void DeviceManager_VK::destroyRenderTargets()
 
 void DeviceManager_VK::beginFrame()
 {
-    // Acquire next image
+    // Get the acquire semaphore for this frame
+    VkSemaphore acquireSemaphore = m_acquireSemaphores[m_acquireSemaphoreIndex];
+    
+    // Acquire next image with semaphore
     VkResult result = vkAcquireNextImageKHR(m_vkDevice, m_swapChain, UINT64_MAX,
-        m_imageAvailableSemaphore, VK_NULL_HANDLE, &m_currentBackBuffer);
+        acquireSemaphore, VK_NULL_HANDLE, &m_currentBackBuffer);
     
     if (result == VK_ERROR_OUT_OF_DATE_KHR)
     {
@@ -720,20 +747,43 @@ void DeviceManager_VK::beginFrame()
         int width, height;
         glfwGetFramebufferSize(m_window, &width, &height);
         resizeSwapChain(width, height);
+        return;
     }
+    
+    // Advance acquire semaphore index for next frame
+    m_acquireSemaphoreIndex = (m_acquireSemaphoreIndex + 1) % static_cast<uint32_t>(m_acquireSemaphores.size());
+    
+    // Tell NVRHI to wait on the acquire semaphore before executing any commands
+    // The semaphore will be waited on when the first command list is submitted
+    m_nvrhiDevice->queueWaitForSemaphore(nvrhi::CommandQueue::Graphics, acquireSemaphore, 0);
 }
 
 void DeviceManager_VK::present()
 {
+    // Get the present semaphore for this swap chain image
+    VkSemaphore presentSemaphore = m_presentSemaphores[m_currentBackBuffer];
+    
+    // Tell NVRHI to signal the present semaphore when all commands are done
+    m_nvrhiDevice->queueSignalSemaphore(nvrhi::CommandQueue::Graphics, presentSemaphore, 0);
+    
+    // Execute any pending commands to actually signal the semaphore
+    m_nvrhiDevice->executeCommandLists(nullptr, 0);
+    
+    // Present with wait on the present semaphore
     VkPresentInfoKHR presentInfo = {};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    presentInfo.waitSemaphoreCount = 0;  // We're waiting for command list execution
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = &presentSemaphore;
     presentInfo.swapchainCount = 1;
     presentInfo.pSwapchains = &m_swapChain;
     presentInfo.pImageIndices = &m_currentBackBuffer;
     
     vkQueuePresentKHR(m_presentQueue, &presentInfo);
-    vkQueueWaitIdle(m_presentQueue);
+    
+    // Wait for GPU to finish all operations to ensure semaphores are available for reuse
+    // This is a simple approach - a more sophisticated implementation would use event queries
+    // to track frames in flight and only wait when necessary
+    m_nvrhiDevice->waitForIdle();
     
     runGarbageCollection();
 }

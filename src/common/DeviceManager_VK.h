@@ -77,8 +77,11 @@ namespace common
         VkQueue m_graphicsQueue = VK_NULL_HANDLE;
         VkQueue m_presentQueue = VK_NULL_HANDLE;
         VkSwapchainKHR m_swapChain = VK_NULL_HANDLE;
-        VkSemaphore m_imageAvailableSemaphore = VK_NULL_HANDLE;
-        VkSemaphore m_renderFinishedSemaphore = VK_NULL_HANDLE;
+        
+        // Synchronization semaphores
+        std::vector<VkSemaphore> m_acquireSemaphores;
+        std::vector<VkSemaphore> m_presentSemaphores;
+        uint32_t m_acquireSemaphoreIndex = 0;
         
         uint32_t m_graphicsQueueFamily = 0;
         uint32_t m_presentQueueFamily = 0;
