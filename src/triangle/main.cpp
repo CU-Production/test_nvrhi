@@ -14,6 +14,8 @@
 #include <array>
 #include <fstream>
 #include <memory>
+#include <sstream>
+#include <iomanip>
 
 // Window dimensions
 constexpr int WINDOW_WIDTH = 1280;
@@ -50,6 +52,7 @@ private:
     
     void render();
     void onResize(int width, int height);
+    void updateWindowTitle();
     
     std::vector<uint8_t> loadShaderFromFile(const std::string& filename);
 
@@ -73,6 +76,12 @@ private:
     nvrhi::InputLayoutHandle m_inputLayout;
     nvrhi::GraphicsPipelineHandle m_pipeline;
     nvrhi::BufferHandle m_vertexBuffer;
+    
+    // FPS tracking
+    double m_lastTime = 0.0;
+    double m_lastTitleUpdateTime = 0.0;
+    int m_frameCount = 0;
+    double m_fps = 0.0;
 };
 
 void TriangleApp::framebufferSizeCallback(GLFWwindow* window, int width, int height)
@@ -122,6 +131,10 @@ bool TriangleApp::initialize(common::GraphicsAPI api)
     if (!loadShaders()) return false;
     if (!createPipeline()) return false;
     if (!createVertexBuffer()) return false;
+    
+    // Set initial window title with API name
+    std::string initialTitle = "NVRHI Triangle Demo - " + std::string(m_deviceManager->getGraphicsAPIName());
+    glfwSetWindowTitle(m_window, initialTitle.c_str());
     
     std::cout << "Initialized with " << m_deviceManager->getGraphicsAPIName() << " backend" << std::endl;
     return true;
@@ -379,14 +392,43 @@ void TriangleApp::render()
     m_deviceManager->present();
 }
 
+void TriangleApp::updateWindowTitle()
+{
+    double currentTime = glfwGetTime();
+    m_frameCount++;
+    
+    // Update FPS every 0.5 seconds
+    double elapsed = currentTime - m_lastTitleUpdateTime;
+    if (elapsed >= 0.5)
+    {
+        m_fps = m_frameCount / elapsed;
+        m_frameCount = 0;
+        m_lastTitleUpdateTime = currentTime;
+        
+        // Build window title with API and FPS
+        std::ostringstream title;
+        title << "["  << m_deviceManager->getGraphicsAPIName() << "] "
+              << "NVRHI Triangle Demo - "
+              << std::fixed << std::setprecision(1) << m_fps << " FPS";
+        
+        glfwSetWindowTitle(m_window, title.str().c_str());
+    }
+}
+
 void TriangleApp::mainLoop()
 {
+    // Initialize timing
+    m_lastTime = glfwGetTime();
+    m_lastTitleUpdateTime = m_lastTime;
+    m_frameCount = 0;
+    
     while (!glfwWindowShouldClose(m_window))
     {
         if(glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
             glfwSetWindowShouldClose(m_window, true);
         glfwPollEvents();
         render();
+        updateWindowTitle();
     }
     
     // Wait for GPU before cleanup
