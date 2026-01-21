@@ -1,0 +1,9 @@
+[submodule "3rd_party/NVRHI"]
+	path = 3rd_party/NVRHI
+	url = https://github.com/NVIDIA-RTX/NVRHI.git
+[submodule "3rd_party/glfw"]
+	path = 3rd_party/glfw
+	url = https://github.com/glfw/glfw.git
+[submodule "3rd_party/pugixml"]
+	path = 3rd_party/pugixml
+	url = https://github.com/zeux/pugixml.git
