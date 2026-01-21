@@ -1,35 +1,23 @@
 // NVRHI Triangle Demo
-// This demo shows how to render a simple colored triangle using NVRHI with D3D12 backend
+// This demo shows how to render a simple colored triangle using NVRHI
+// Supports both D3D12 and Vulkan backends
 
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <d3d12.h>
-#include <dxgi1_6.h>
-#include <wrl/client.h>
+#include <DeviceManager.h>
 
 #include <GLFW/glfw3.h>
-#define GLFW_EXPOSE_NATIVE_WIN32
-#include <GLFW/glfw3native.h>
 
 #include <nvrhi/nvrhi.h>
-#include <nvrhi/d3d12.h>
-#include <nvrhi/validation.h>
 #include <nvrhi/utils.h>
-#include <nvrhi/common/resource.h>
 
 #include <iostream>
 #include <vector>
 #include <array>
 #include <fstream>
-#include <filesystem>
-
-using Microsoft::WRL::ComPtr;
+#include <memory>
 
 // Window dimensions
 constexpr int WINDOW_WIDTH = 1280;
 constexpr int WINDOW_HEIGHT = 720;
-constexpr int SWAP_CHAIN_BUFFER_COUNT = 2;
 
 // Vertex structure matching shader input
 struct Vertex
@@ -46,77 +34,38 @@ static const std::array<Vertex, 3> g_TriangleVertices = {{
     {{ -0.5f,  -0.5f, 0.0f },  { 0.0f, 0.0f, 1.0f }}   // Bottom Left - Blue
 }};
 
-// Message callback for NVRHI errors and warnings
-class MessageCallback : public nvrhi::IMessageCallback
-{
-public:
-    void message(nvrhi::MessageSeverity severity, const char* messageText) override
-    {
-        const char* severityStr = "";
-        switch (severity)
-        {
-        case nvrhi::MessageSeverity::Info:    severityStr = "[INFO]"; break;
-        case nvrhi::MessageSeverity::Warning: severityStr = "[WARNING]"; break;
-        case nvrhi::MessageSeverity::Error:   severityStr = "[ERROR]"; break;
-        case nvrhi::MessageSeverity::Fatal:   severityStr = "[FATAL]"; break;
-        }
-        std::cout << severityStr << " " << messageText << std::endl;
-    }
-};
-
 // Application class encapsulating all rendering state
 class TriangleApp
 {
 public:
-    bool initialize();
+    bool initialize(common::GraphicsAPI api);
     void mainLoop();
     void cleanup();
 
 private:
     bool initWindow();
-    bool initD3D12();
-    bool initNVRHI();
-    bool createSwapChain();
-    bool createRenderTargets();
     bool loadShaders();
     bool createPipeline();
     bool createVertexBuffer();
     
     void render();
-    void waitForGPU();
-    void resizeSwapChain();
+    void onResize(int width, int height);
     
     std::vector<uint8_t> loadShaderFromFile(const std::string& filename);
+
+    // GLFW window resize callback
+    static void framebufferSizeCallback(GLFWwindow* window, int width, int height);
 
 private:
     // Window
     GLFWwindow* m_window = nullptr;
-    HWND m_hwnd = nullptr;
     int m_windowWidth = WINDOW_WIDTH;
     int m_windowHeight = WINDOW_HEIGHT;
     bool m_windowResized = false;
     
-    // D3D12 objects
-    ComPtr<IDXGIFactory6> m_dxgiFactory;
-    ComPtr<IDXGIAdapter1> m_adapter;
-    ComPtr<ID3D12Device> m_d3d12Device;
-    ComPtr<ID3D12CommandQueue> m_commandQueue;
-    ComPtr<IDXGISwapChain4> m_swapChain;
-    ComPtr<ID3D12Fence> m_fence;
-    HANDLE m_fenceEvent = nullptr;
-    uint64_t m_fenceValue = 0;
-    
-    // NVRHI objects
-    MessageCallback m_messageCallback;
-    nvrhi::d3d12::DeviceHandle m_nvrhiDevice;
-    nvrhi::DeviceHandle m_validationLayer;
+    // Device manager (handles D3D12/Vulkan backend)
+    std::unique_ptr<common::IDeviceManager> m_deviceManager;
     nvrhi::CommandListHandle m_commandList;
-    
-    // Render targets
-    std::vector<ComPtr<ID3D12Resource>> m_swapChainBuffers;
-    std::vector<nvrhi::TextureHandle> m_swapChainTextures;
-    std::vector<nvrhi::FramebufferHandle> m_framebuffers;
-    uint32_t m_currentBackBuffer = 0;
     
     // Pipeline resources
     nvrhi::ShaderHandle m_vertexShader;
@@ -126,17 +75,55 @@ private:
     nvrhi::BufferHandle m_vertexBuffer;
 };
 
-bool TriangleApp::initialize()
+void TriangleApp::framebufferSizeCallback(GLFWwindow* window, int width, int height)
+{
+    auto app = static_cast<TriangleApp*>(glfwGetWindowUserPointer(window));
+    app->m_windowWidth = width;
+    app->m_windowHeight = height;
+    app->m_windowResized = true;
+}
+
+bool TriangleApp::initialize(common::GraphicsAPI api)
 {
     if (!initWindow()) return false;
-    if (!initD3D12()) return false;
-    if (!initNVRHI()) return false;
-    if (!createSwapChain()) return false;
-    if (!createRenderTargets()) return false;
+    
+    // Create device manager for the selected API
+    m_deviceManager = common::createDeviceManager(api);
+    if (!m_deviceManager)
+    {
+        std::cerr << "Failed to create device manager for " << common::graphicsAPIToString(api) << std::endl;
+        return false;
+    }
+    
+    // Set up device creation params
+    common::DeviceCreationParams params;
+    params.window = m_window;
+    params.windowWidth = m_windowWidth;
+    params.windowHeight = m_windowHeight;
+    params.swapChainBufferCount = 2;
+    params.enableDebugLayer = true;
+    params.enableValidationLayer = true;
+    params.vsync = true;
+    
+    if (!m_deviceManager->createDevice(params))
+    {
+        std::cerr << "Failed to create device" << std::endl;
+        return false;
+    }
+    
+    // Create command list
+    m_commandList = m_deviceManager->createCommandList();
+    if (!m_commandList)
+    {
+        std::cerr << "Failed to create command list" << std::endl;
+        return false;
+    }
+    
     if (!loadShaders()) return false;
     if (!createPipeline()) return false;
     if (!createVertexBuffer()) return false;
     
+    std::cout << "Initialized with " << m_deviceManager->getGraphicsAPIName() << " backend" << std::endl;
     return true;
 }
 
@@ -160,210 +147,9 @@ bool TriangleApp::initWindow()
         return false;
     }
     
-    m_hwnd = glfwGetWin32Window(m_window);
-    
     // Set user pointer for resize callback
     glfwSetWindowUserPointer(m_window, this);
-    glfwSetFramebufferSizeCallback(m_window, [](GLFWwindow* window, int width, int height) {
-        auto app = static_cast<TriangleApp*>(glfwGetWindowUserPointer(window));
-        app->m_windowWidth = width;
-        app->m_windowHeight = height;
-        app->m_windowResized = true;
-    });
-    
-    return true;
-}
-
-bool TriangleApp::initD3D12()
-{
-    UINT dxgiFactoryFlags = 0;
-    
-#ifdef _DEBUG
-    // Enable debug layer
-    ComPtr<ID3D12Debug> debugController;
-    if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
-    {
-        debugController->EnableDebugLayer();
-        dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
-    }
-#endif
-    
-    // Create DXGI factory
-    if (FAILED(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&m_dxgiFactory))))
-    {
-        std::cerr << "Failed to create DXGI factory" << std::endl;
-        return false;
-    }
-    
-    // Find a suitable adapter
-    for (UINT i = 0; m_dxgiFactory->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, 
-         IID_PPV_ARGS(&m_adapter)) != DXGI_ERROR_NOT_FOUND; i++)
-    {
-        DXGI_ADAPTER_DESC1 desc;
-        m_adapter->GetDesc1(&desc);
-        
-        // Skip software adapters
-        if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
-            continue;
-            
-        // Check if adapter supports D3D12
-        if (SUCCEEDED(D3D12CreateDevice(m_adapter.Get(), D3D_FEATURE_LEVEL_12_0, _uuidof(ID3D12Device), nullptr)))
-        {
-            std::wcout << L"Using GPU: " << desc.Description << std::endl;
-            break;
-        }
-    }
-    
-    if (!m_adapter)
-    {
-        std::cerr << "No suitable GPU adapter found" << std::endl;
-        return false;
-    }
-    
-    // Create D3D12 device
-    if (FAILED(D3D12CreateDevice(m_adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&m_d3d12Device))))
-    {
-        std::cerr << "Failed to create D3D12 device" << std::endl;
-        return false;
-    }
-    
-    // Create command queue
-    D3D12_COMMAND_QUEUE_DESC queueDesc = {};
-    queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    queueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
-    queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-    
-    if (FAILED(m_d3d12Device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_commandQueue))))
-    {
-        std::cerr << "Failed to create command queue" << std::endl;
-        return false;
-    }
-    
-    // Create fence for synchronization
-    if (FAILED(m_d3d12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence))))
-    {
-        std::cerr << "Failed to create fence" << std::endl;
-        return false;
-    }
-    
-    m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-    if (!m_fenceEvent)
-    {
-        std::cerr << "Failed to create fence event" << std::endl;
-        return false;
-    }
-    
-    return true;
-}
-
-bool TriangleApp::initNVRHI()
-{
-    // Create NVRHI D3D12 device
-    nvrhi::d3d12::DeviceDesc deviceDesc = {};
-    deviceDesc.errorCB = &m_messageCallback;
-    deviceDesc.pDevice = m_d3d12Device.Get();
-    deviceDesc.pGraphicsCommandQueue = m_commandQueue.Get();
-    
-    m_nvrhiDevice = nvrhi::d3d12::createDevice(deviceDesc);
-    if (!m_nvrhiDevice)
-    {
-        std::cerr << "Failed to create NVRHI device" << std::endl;
-        return false;
-    }
-    
-    // Wrap with validation layer for debugging
-    m_validationLayer = nvrhi::validation::createValidationLayer(m_nvrhiDevice);
-    
-    // Create command list
-    m_commandList = m_validationLayer->createCommandList();
-    if (!m_commandList)
-    {
-        std::cerr << "Failed to create command list" << std::endl;
-        return false;
-    }
-    
-    return true;
-}
-
-bool TriangleApp::createSwapChain()
-{
-    DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
-    swapChainDesc.Width = m_windowWidth;
-    swapChainDesc.Height = m_windowHeight;
-    swapChainDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    swapChainDesc.SampleDesc.Count = 1;
-    swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    swapChainDesc.BufferCount = SWAP_CHAIN_BUFFER_COUNT;
-    swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    swapChainDesc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
-    
-    ComPtr<IDXGISwapChain1> swapChain1;
-    if (FAILED(m_dxgiFactory->CreateSwapChainForHwnd(
-        m_commandQueue.Get(), m_hwnd, &swapChainDesc, nullptr, nullptr, &swapChain1)))
-    {
-        std::cerr << "Failed to create swap chain" << std::endl;
-        return false;
-    }
-    
-    // Disable Alt+Enter fullscreen toggle
-    m_dxgiFactory->MakeWindowAssociation(m_hwnd, DXGI_MWA_NO_ALT_ENTER);
-    
-    if (FAILED(swapChain1.As(&m_swapChain)))
-    {
-        std::cerr << "Failed to get IDXGISwapChain4 interface" << std::endl;
-        return false;
-    }
-    
-    return true;
-}
-
-bool TriangleApp::createRenderTargets()
-{
-    m_swapChainBuffers.resize(SWAP_CHAIN_BUFFER_COUNT);
-    m_swapChainTextures.resize(SWAP_CHAIN_BUFFER_COUNT);
-    m_framebuffers.resize(SWAP_CHAIN_BUFFER_COUNT);
-    
-    for (UINT i = 0; i < SWAP_CHAIN_BUFFER_COUNT; i++)
-    {
-        if (FAILED(m_swapChain->GetBuffer(i, IID_PPV_ARGS(&m_swapChainBuffers[i]))))
-        {
-            std::cerr << "Failed to get swap chain buffer " << i << std::endl;
-            return false;
-        }
-        
-        // Create NVRHI texture handle for the swap chain buffer
-        nvrhi::TextureDesc textureDesc = {};
-        textureDesc.width = m_windowWidth;
-        textureDesc.height = m_windowHeight;
-        textureDesc.format = nvrhi::Format::RGBA8_UNORM;
-        textureDesc.dimension = nvrhi::TextureDimension::Texture2D;
-        textureDesc.isRenderTarget = true;
-        textureDesc.initialState = nvrhi::ResourceStates::Present;
-        textureDesc.keepInitialState = true;
-        textureDesc.debugName = "SwapChainBuffer" + std::to_string(i);
-        
-        m_swapChainTextures[i] = m_nvrhiDevice->createHandleForNativeTexture(
-            nvrhi::ObjectTypes::D3D12_Resource,
-            static_cast<nvrhi::Object>(m_swapChainBuffers[i].Get()), 
-            textureDesc);
-        
-        if (!m_swapChainTextures[i])
-        {
-            std::cerr << "Failed to create texture handle for swap chain buffer " << i << std::endl;
-            return false;
-        }
-        
-        // Create framebuffer
-        nvrhi::FramebufferDesc fbDesc = {};
-        fbDesc.addColorAttachment(m_swapChainTextures[i]);
-        
-        m_framebuffers[i] = m_validationLayer->createFramebuffer(fbDesc);
-        if (!m_framebuffers[i])
-        {
-            std::cerr << "Failed to create framebuffer " << i << std::endl;
-            return false;
-        }
-    }
+    glfwSetFramebufferSizeCallback(m_window, framebufferSizeCallback);
     
     return true;
 }
@@ -387,25 +173,49 @@ std::vector<uint8_t> TriangleApp::loadShaderFromFile(const std::string& filename
 
 bool TriangleApp::loadShaders()
 {
-    // Try to load pre-compiled shaders first
-    std::vector<uint8_t> vsData = loadShaderFromFile("shaders/triangle_vs.dxil");
-    std::vector<uint8_t> psData = loadShaderFromFile("shaders/triangle_ps.dxil");
+    // Determine shader file extension based on API
+    std::string vsFile, psFile;
+    
+    if (m_deviceManager->getGraphicsAPI() == common::GraphicsAPI::D3D12)
+    {
+        vsFile = "shaders/triangle_vs.dxil";
+        psFile = "shaders/triangle_ps.dxil";
+    }
+    else // Vulkan
+    {
+        vsFile = "shaders/triangle_vs.spv";
+        psFile = "shaders/triangle_ps.spv";
+    }
+    
+    std::vector<uint8_t> vsData = loadShaderFromFile(vsFile);
+    std::vector<uint8_t> psData = loadShaderFromFile(psFile);
     
     if (vsData.empty() || psData.empty())
     {
         std::cerr << "Failed to load shader files. Please compile shaders first." << std::endl;
-        std::cerr << "Run: slangc triangle.slang -profile sm_6_0 -target dxil -entry vsMain -stage vertex -o triangle_vs.dxil" << std::endl;
-        std::cerr << "     slangc triangle.slang -profile sm_6_0 -target dxil -entry psMain -stage fragment -o triangle_ps.dxil" << std::endl;
+        std::cerr << "Required files: " << vsFile << ", " << psFile << std::endl;
+        std::cerr << std::endl;
+        std::cerr << "For D3D12 (DXIL), run:" << std::endl;
+        std::cerr << "  slangc triangle.slang -profile sm_6_0 -target dxil -entry vsMain -stage vertex -o triangle_vs.dxil" << std::endl;
+        std::cerr << "  slangc triangle.slang -profile sm_6_0 -target dxil -entry psMain -stage fragment -o triangle_ps.dxil" << std::endl;
+        std::cerr << std::endl;
+        std::cerr << "For Vulkan (SPIR-V), run:" << std::endl;
+        std::cerr << "  slangc triangle.slang -profile glsl_450 -target spirv -entry vsMain -stage vertex -o triangle_vs.spv" << std::endl;
+        std::cerr << "  slangc triangle.slang -profile glsl_450 -target spirv -entry psMain -stage fragment -o triangle_ps.spv" << std::endl;
         return false;
     }
+    
+    // Entry point names differ between D3D12 (keeps original name) and Vulkan (SPIR-V uses "main")
+    const char* vsEntryName = (m_deviceManager->getGraphicsAPI() == common::GraphicsAPI::Vulkan) ? "main" : "vsMain";
+    const char* psEntryName = (m_deviceManager->getGraphicsAPI() == common::GraphicsAPI::Vulkan) ? "main" : "psMain";
     
     // Create vertex shader
     nvrhi::ShaderDesc vsDesc = {};
     vsDesc.shaderType = nvrhi::ShaderType::Vertex;
     vsDesc.debugName = "TriangleVS";
-    vsDesc.entryName = "vsMain";
+    vsDesc.entryName = vsEntryName;
     
-    m_vertexShader = m_validationLayer->createShader(vsDesc, vsData.data(), vsData.size());
+    m_vertexShader = m_deviceManager->getDevice()->createShader(vsDesc, vsData.data(), vsData.size());
     if (!m_vertexShader)
     {
         std::cerr << "Failed to create vertex shader" << std::endl;
@@ -416,9 +226,9 @@ bool TriangleApp::loadShaders()
     nvrhi::ShaderDesc psDesc = {};
     psDesc.shaderType = nvrhi::ShaderType::Pixel;
     psDesc.debugName = "TrianglePS";
-    psDesc.entryName = "psMain";
+    psDesc.entryName = psEntryName;
     
-    m_pixelShader = m_validationLayer->createShader(psDesc, psData.data(), psData.size());
+    m_pixelShader = m_deviceManager->getDevice()->createShader(psDesc, psData.data(), psData.size());
     if (!m_pixelShader)
     {
         std::cerr << "Failed to create pixel shader" << std::endl;
@@ -444,9 +254,9 @@ bool TriangleApp::createPipeline()
             .setElementStride(sizeof(Vertex))
     }};
     
-    m_inputLayout = m_validationLayer->createInputLayout(
-        vertexAttributes.data(), 
-        static_cast<uint32_t>(vertexAttributes.size()), 
+    m_inputLayout = m_deviceManager->getDevice()->createInputLayout(
+        vertexAttributes.data(),
+        static_cast<uint32_t>(vertexAttributes.size()),
         m_vertexShader);
     
     if (!m_inputLayout)
@@ -469,9 +279,9 @@ bool TriangleApp::createPipeline()
     
     // Use framebuffer info for pipeline creation
     nvrhi::FramebufferInfo fbInfo;
-    fbInfo.addColorFormat(nvrhi::Format::RGBA8_UNORM);
+    fbInfo.addColorFormat(m_deviceManager->getSwapChainFormat());
     
-    m_pipeline = m_validationLayer->createGraphicsPipeline(pipelineDesc, fbInfo);
+    m_pipeline = m_deviceManager->getDevice()->createGraphicsPipeline(pipelineDesc, fbInfo);
     if (!m_pipeline)
     {
         std::cerr << "Failed to create graphics pipeline" << std::endl;
@@ -491,7 +301,7 @@ bool TriangleApp::createVertexBuffer()
     bufferDesc.keepInitialState = true;
     bufferDesc.debugName = "TriangleVertexBuffer";
     
-    m_vertexBuffer = m_validationLayer->createBuffer(bufferDesc);
+    m_vertexBuffer = m_deviceManager->getDevice()->createBuffer(bufferDesc);
     if (!m_vertexBuffer)
     {
         std::cerr << "Failed to create vertex buffer" << std::endl;
@@ -503,10 +313,18 @@ bool TriangleApp::createVertexBuffer()
     m_commandList->writeBuffer(m_vertexBuffer, g_TriangleVertices.data(), bufferDesc.byteSize);
     m_commandList->close();
     
-    m_validationLayer->executeCommandLists(&m_commandList, 1);
-    m_validationLayer->waitForIdle();
+    m_deviceManager->executeCommandList(m_commandList);
+    m_deviceManager->waitForIdle();
     
     return true;
+}
+
+void TriangleApp::onResize(int width, int height)
+{
+    if (width == 0 || height == 0)
+        return;
+    
+    m_deviceManager->resizeSwapChain(width, height);
 }
 
 void TriangleApp::render()
@@ -514,7 +332,7 @@ void TriangleApp::render()
     // Handle window resize
     if (m_windowResized)
     {
-        resizeSwapChain();
+        onResize(m_windowWidth, m_windowHeight);
         m_windowResized = false;
     }
     
@@ -522,23 +340,23 @@ void TriangleApp::render()
     if (m_windowWidth == 0 || m_windowHeight == 0)
         return;
     
-    // Get current back buffer index
-    m_currentBackBuffer = m_swapChain->GetCurrentBackBufferIndex();
+    // Begin frame (acquires next swap chain image)
+    m_deviceManager->beginFrame();
     
     // Begin recording commands
     m_commandList->open();
     
     // Clear render target to dark blue
-    nvrhi::utils::ClearColorAttachment(m_commandList, m_framebuffers[m_currentBackBuffer], 0, 
+    nvrhi::utils::ClearColorAttachment(m_commandList, m_deviceManager->getCurrentFramebuffer(), 0,
         nvrhi::Color(0.1f, 0.1f, 0.2f, 1.0f));
     
     // Set up graphics state
     nvrhi::GraphicsState state = {};
     state.pipeline = m_pipeline;
-    state.framebuffer = m_framebuffers[m_currentBackBuffer];
+    state.framebuffer = m_deviceManager->getCurrentFramebuffer();
     state.viewport.addViewportAndScissorRect(nvrhi::Viewport(
-        static_cast<float>(m_windowWidth), 
-        static_cast<float>(m_windowHeight)));
+        static_cast<float>(m_deviceManager->getWindowWidth()),
+        static_cast<float>(m_deviceManager->getWindowHeight())));
     state.addVertexBuffer(nvrhi::VertexBufferBinding()
         .setBuffer(m_vertexBuffer)
         .setSlot(0)
@@ -555,57 +373,10 @@ void TriangleApp::render()
     m_commandList->close();
     
     // Execute command list
-    m_validationLayer->executeCommandLists(&m_commandList, 1);
+    m_deviceManager->executeCommandList(m_commandList);
     
     // Present
-    m_swapChain->Present(1, 0);
-    
-    // Wait for GPU to finish
-    waitForGPU();
-    
-    // Run garbage collection to release unused resources
-    m_validationLayer->runGarbageCollection();
-}
-
-void TriangleApp::waitForGPU()
-{
-    m_fenceValue++;
-    m_commandQueue->Signal(m_fence.Get(), m_fenceValue);
-    
-    if (m_fence->GetCompletedValue() < m_fenceValue)
-    {
-        m_fence->SetEventOnCompletion(m_fenceValue, m_fenceEvent);
-        WaitForSingleObject(m_fenceEvent, INFINITE);
-    }
-}
-
-void TriangleApp::resizeSwapChain()
-{
-    if (m_windowWidth == 0 || m_windowHeight == 0)
-        return;
-    
-    // Wait for GPU to finish before resizing
-    waitForGPU();
-    
-    // Release old resources
-    m_framebuffers.clear();
-    m_swapChainTextures.clear();
-    m_swapChainBuffers.clear();
-    
-    // Resize swap chain
-    if (FAILED(m_swapChain->ResizeBuffers(
-        SWAP_CHAIN_BUFFER_COUNT, 
-        m_windowWidth, 
-        m_windowHeight, 
-        DXGI_FORMAT_R8G8B8A8_UNORM, 
-        DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH)))
-    {
-        std::cerr << "Failed to resize swap chain" << std::endl;
-        return;
-    }
-    
-    // Recreate render targets
-    createRenderTargets();
+    m_deviceManager->present();
 }
 
 void TriangleApp::mainLoop()
@@ -614,42 +385,30 @@ void TriangleApp::mainLoop()
     {
         if(glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
             glfwSetWindowShouldClose(m_window, true);
-
         glfwPollEvents();
         render();
     }
     
     // Wait for GPU before cleanup
-    waitForGPU();
+    m_deviceManager->waitForIdle();
 }
 
 void TriangleApp::cleanup()
 {
-    // Release NVRHI resources
+    // Release pipeline resources
     m_vertexBuffer = nullptr;
     m_pipeline = nullptr;
     m_inputLayout = nullptr;
     m_pixelShader = nullptr;
     m_vertexShader = nullptr;
     m_commandList = nullptr;
-    m_framebuffers.clear();
-    m_swapChainTextures.clear();
-    m_validationLayer = nullptr;
-    m_nvrhiDevice = nullptr;
     
-    // Release D3D12 resources
-    m_swapChainBuffers.clear();
-    if (m_fenceEvent)
+    // Destroy device manager
+    if (m_deviceManager)
     {
-        CloseHandle(m_fenceEvent);
-        m_fenceEvent = nullptr;
+        m_deviceManager->destroyDevice();
+        m_deviceManager.reset();
     }
-    m_fence.Reset();
-    m_swapChain.Reset();
-    m_commandQueue.Reset();
-    m_d3d12Device.Reset();
-    m_adapter.Reset();
-    m_dxgiFactory.Reset();
     
     // Cleanup GLFW
     if (m_window)
@@ -660,17 +419,58 @@ void TriangleApp::cleanup()
     glfwTerminate();
 }
 
+// Parse command line arguments to select graphics API
+common::GraphicsAPI parseCommandLine(int argc, char* argv[])
+{
+    // Default to D3D12 on Windows, Vulkan otherwise
+#ifdef _WIN32
+    common::GraphicsAPI defaultAPI = common::GraphicsAPI::D3D12;
+#else
+    common::GraphicsAPI defaultAPI = common::GraphicsAPI::Vulkan;
+#endif
+    
+    for (int i = 1; i < argc; i++)
+    {
+        std::string arg = argv[i];
+        if (arg == "-d3d12" || arg == "--d3d12" || arg == "-dx12")
+        {
+            return common::GraphicsAPI::D3D12;
+        }
+        else if (arg == "-vulkan" || arg == "--vulkan" || arg == "-vk")
+        {
+            return common::GraphicsAPI::Vulkan;
+        }
+        else if (arg == "-h" || arg == "--help")
+        {
+            std::cout << "NVRHI Triangle Demo" << std::endl;
+            std::cout << "Usage: " << argv[0] << " [options]" << std::endl;
+            std::cout << "Options:" << std::endl;
+            std::cout << "  -d3d12, --d3d12, -dx12    Use D3D12 backend (Windows only)" << std::endl;
+            std::cout << "  -vulkan, --vulkan, -vk    Use Vulkan backend" << std::endl;
+            std::cout << "  -h, --help                Show this help message" << std::endl;
+            std::exit(0);
+        }
+    }
+    
+    return defaultAPI;
+}
+
 int main(int argc, char* argv[])
 {
+    common::GraphicsAPI api = parseCommandLine(argc, argv);
+    
+    std::cout << "NVRHI Triangle Demo" << std::endl;
+    std::cout << "Selected API: " << common::graphicsAPIToString(api) << std::endl;
+    
     TriangleApp app;
     
-    if (!app.initialize())
+    if (!app.initialize(api))
     {
         std::cerr << "Failed to initialize application" << std::endl;
         return -1;
     }
     
-    std::cout << "NVRHI Triangle Demo started. Press Escape or close window to exit." << std::endl;
+    std::cout << "Press Escape or close window to exit." << std::endl;
     
     app.mainLoop();
     app.cleanup();

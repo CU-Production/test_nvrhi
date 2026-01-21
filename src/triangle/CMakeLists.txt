@@ -19,35 +19,8 @@ add_executable(${TARGET_NAME} ${SOURCES} ${SHADERS})
 source_group("Source Files" FILES ${SOURCES})
 source_group("Shaders" FILES ${SHADERS})
 
-# Include directories
-target_include_directories(${TARGET_NAME} PRIVATE
-    ${CMAKE_SOURCE_DIR}/3rd_party/NVRHI/include
-    ${CMAKE_SOURCE_DIR}/3rd_party/glfw/include
-)
-
-# Link libraries
-target_link_libraries(${TARGET_NAME} PRIVATE
-    nvrhi
-    nvrhi_d3d12
-    glfw
-    d3d12
-    dxgi
-    dxguid
-)
-
-# Windows-specific settings
-if(WIN32)
-    target_compile_definitions(${TARGET_NAME} PRIVATE
-        NOMINMAX
-        WIN32_LEAN_AND_MEAN
-        _CRT_SECURE_NO_WARNINGS
-    )
-    
-    # Link Windows libraries
-    target_link_libraries(${TARGET_NAME} PRIVATE
-        dwmapi
-    )
-endif()
+# Link common library (includes nvrhi and backend dependencies)
+target_link_libraries(${TARGET_NAME} PRIVATE common)
 
 # Set working directory for debugging
 set_target_properties(${TARGET_NAME} PROPERTIES
@@ -64,15 +37,17 @@ add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
 )
 
 # Optional: Add shader compilation target
-# Try Slang first, then fall back to DXC
+# Try Slang first, then fall back to DXC for DXIL
 find_program(SLANGC_EXECUTABLE slangc)
+find_program(DXC_EXECUTABLE dxc)
 
 if(SLANGC_EXECUTABLE)
     message(STATUS "Found Slang compiler: ${SLANGC_EXECUTABLE}")
     
-    # Custom target to compile shaders using Slang
+    # Custom target to compile shaders using Slang (both DXIL and SPIR-V)
     add_custom_target(compile_triangle_shaders
-        COMMAND ${SLANGC_EXECUTABLE} 
+        # Compile DXIL shaders for D3D12
+        COMMAND ${SLANGC_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle.slang"
             -profile sm_6_0
             -target dxil
@@ -86,8 +61,23 @@ if(SLANGC_EXECUTABLE)
             -entry psMain
             -stage fragment
             -o "${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle_ps.dxil"
+        # Compile SPIR-V shaders for Vulkan
+        COMMAND ${SLANGC_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle.slang"
+            -profile glsl_450
+            -target spirv
+            -entry vsMain
+            -stage vertex
+            -o "${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle_vs.spv"
+        COMMAND ${SLANGC_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle.slang"
+            -profile glsl_450
+            -target spirv
+            -entry psMain
+            -stage fragment
+            -o "${CMAKE_CURRENT_SOURCE_DIR}/shaders/triangle_ps.spv"
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        COMMENT "Compiling Slang shaders..."
+        COMMENT "Compiling Slang shaders (DXIL + SPIR-V)..."
         SOURCES ${SHADERS}
     )
     
@@ -95,8 +85,9 @@ if(SLANGC_EXECUTABLE)
     add_dependencies(${TARGET_NAME} compile_triangle_shaders)
     
 else()
-    message(WARNING "No shader compiler found (slangc). Shaders must be compiled manually.")
-    message(STATUS "To compile shaders manually, run one of:")
-    message(STATUS "  Using Slang: slangc triangle.slang -profile sm_6_0 -target dxil -entry vsMain -stage vertex -o triangle_vs.dxil")
+    message(WARNING "No shader compiler found (slangc or dxc). Shaders must be compiled manually.")
+    message(STATUS "To compile shaders manually:")
+    message(STATUS "  For D3D12: slangc triangle.slang -profile sm_6_0 -target dxil -entry vsMain -stage vertex -o triangle_vs.dxil")
+    message(STATUS "  For Vulkan: slangc triangle.slang -profile glsl_450 -target spirv -entry vsMain -stage vertex -o triangle_vs.spv")
     message(STATUS "Or run the compile_shaders.bat script in the shaders directory.")
 endif()

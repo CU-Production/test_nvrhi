@@ -7,5 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Build third-party libraries
 add_subdirectory(3rd_party)
 
+# Build common library (device management abstraction)
+add_subdirectory(src/common)
+
 # Build demos
 add_subdirectory(src/triangle)
